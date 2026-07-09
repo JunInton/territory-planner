@@ -76,6 +76,9 @@ type Provider = {
 //   return taxonomy.primary === 'true' || taxonomy.desc.toLowerCase().includes('primary');
 // }
 
+function getPrimaryTaxonomy(taxonomies: NpiTaxonomy[]): NpiTaxonomy | null {
+  return taxonomies.find(t => t.primary === 'true') || taxonomies[0] || null;
+}
 
 /**
  * Picks the best available visit address from a provider's address list.
@@ -116,19 +119,51 @@ function getCityState(addresses: NpiAddress[]): { city: string; state: string } 
 }
 
 /**
+ * Find the single best address for a provider, in order of preference:
+ * 1. practiceLocations (if available)
+ * 2. addresses with address_purpose = "LOCATION"
+ * 3. addresses with address_purpose = "MAILING"
+ * 4. null if none of the above exist
+ */
+
+function getBestAddress( addresses: NpiAddress[], searchedState: string, practiceLocations?: NpiAddress[]): NpiAddress | null {
+  // First, check if practiceLocations is populated and return the first one
+  if (practiceLocations && practiceLocations.length > 0) {
+    // Filter the addresses in practiceLocations and find the address that matches the searched state, if any
+    const practiceLocationMatchesState = practiceLocations.find(pl => pl.state === searchedState)
+    if (practiceLocationMatchesState) return practiceLocationMatchesState;
+  }
+  
+  // Next, check for LOCATION addresses
+  const location = addresses.find(a => a.address_purpose === 'LOCATION');
+  if (location) return location;
+
+  // Finally, check for MAILING addresses
+  const mailing = addresses.find(a => a.address_purpose === 'MAILING');
+  if (mailing) return mailing;
+
+  // If none of the above exist, return null
+  return null;
+}
+
+/**
  * Transforms one raw NPI API result into our clean Provider shape.
  *
  * WHY: The NPI API returns deeply nested, inconsistently named fields.
  * This function is the single place we deal with that messiness so the
  * rest of the code can work with clean, predictable data.
  */
-function transformProvider(raw: NpiRawResult): Provider {
+function transformProvider(raw: NpiRawResult, searchedState: string): Provider | null {
 
-  // TODO: We should ideally confirm the provider is licensed in the state we're searching for by checking the taxonomy's "state" field and checking if primary is set to true in the state we are searching for
-  // Find the primary taxonomy (specialty) for this provider
-  const primaryTaxonomy = raw.taxonomies.find(t=> t.primary === 'true') || raw.taxonomies[0] || { desc: 'Unknown' };
+  const primaryTaxonomy = getPrimaryTaxonomy(raw.taxonomies);
+  console.log(`Provider ${primaryTaxonomy?.state || 'unknown'} primary taxonomy:`, primaryTaxonomy);
+  if (!primaryTaxonomy || primaryTaxonomy.state !== searchedState) {
+    console.log(`Skipping provider ${raw.number} — no primary taxonomy or not licensed in ${primaryTaxonomy?.state || 'unknown'}, ${searchedState}`);
+    return null; // Skip this provider if no primary taxonomy or not licensed in the searched state
+  }
 
-  const { city, state } = getCityState(raw.addresses);
+  // const { city, state } = getCityState(raw.addresses);
+  const bestAddress = getBestAddress(raw.addresses, searchedState, raw.practiceLocations);
 
   return {
     npi: raw.number,
@@ -139,13 +174,13 @@ function transformProvider(raw: NpiRawResult): Provider {
     last_name: raw.basic.last_name || raw.basic.authorized_official_last_name || '',
     credential: raw.basic.credential || raw.basic.authorized_official_credential || '',
     npi_type: raw.enumeration_type,
-    city,
-    state,
+    city: bestAddress?.city || '',
+    state: bestAddress?.state || '',
     last_updated: raw.basic.last_updated || '',
     // A provider can have multiple taxonomies — join them into one readable string
     // e.g. "Internal Medicine, Medical Oncology"
     specialty: raw.taxonomies.map(t => t.desc).join(', '),
-    mailingAddress: getAddress(raw.addresses),
+    mailingAddress: bestAddress?.address_1 || null,
     practiceLocations: raw.practiceLocations ?? [], // some records have this populated in addition to "addresses"
   };
 }
@@ -182,7 +217,6 @@ function deduplicateProviders(providers: Provider[]): Provider[] {
   // Convert the Map's values back into a plain array for the response
   return Array.from(providerMap.values());
 }
-
 
 // ============================================================
 // ROUTES
@@ -224,7 +258,8 @@ router.get('/npi', async (req, res) => {
     // Step 2: Transform each raw result into our clean Provider shape
     const providers = rawResults
       .filter(r => r.enumeration_type === 'NPI-1')
-      .map(transformProvider);
+      .map(r => transformProvider(r, state as string))
+      .filter((p): p is Provider => p !== null); // Type guard to remove nulls
 
     // Step 3: Merge duplicate entries for the same doctor
     const deduplicated = deduplicateProviders(providers);
