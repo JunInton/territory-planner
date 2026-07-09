@@ -11,8 +11,8 @@ const router = express.Router();
 
 // Represents one address object inside a provider's record.
 // The NPI API can return up to 2 addresses per provider:
-//   - "MAILING"  → where mail is sent (P.O. box, office billing, etc.)
 //   - "LOCATION" → where the provider physically works
+//   - "MAILING"  → where mail is sent (P.O. box, office billing, etc.)
 type NpiAddress = {
   address_purpose: 'MAILING' | 'LOCATION';
   address_1: string;
@@ -78,22 +78,23 @@ type Provider = {
 
 
 /**
- * Picks the best available address from a provider's address list.
+ * Picks the best available visit address from a provider's address list.
  *
  * THE BUG WE'RE FIXING: Previously this was:
  *   provider.addresses.find(...).address_1
- * If .find() returned undefined (no MAILING address), accessing
+ * If .find() returned undefined, accessing
  * .address_1 on undefined would throw a TypeError and crash the
- * whole request. Now we safely fall back to LOCATION, then null.
+ * whole request. Now we safely prefer LOCATION, fall back to MAILING,
+ * then return null.
  */
 function getAddress(addresses: NpiAddress[]): string | null {
-  // First, try to find a MAILING address
-  const mailing = addresses.find(a => a.address_purpose === 'MAILING');
-  if (mailing?.address_1) return mailing.address_1;
-
-  // If no MAILING address, fall back to LOCATION
+  // First, try to find the physical practice location.
   const location = addresses.find(a => a.address_purpose === 'LOCATION');
   if (location?.address_1) return location.address_1;
+
+  // If no LOCATION address exists, fall back to MAILING.
+  const mailing = addresses.find(a => a.address_purpose === 'MAILING');
+  if (mailing?.address_1) return mailing.address_1;
 
   // If neither exists, return null — the UI should handle this gracefully
   return null;
@@ -101,15 +102,15 @@ function getAddress(addresses: NpiAddress[]): string | null {
 
 /**
  * Picks the best available city and state from a provider's address list.
- * Uses the same priority order as getAddress() — MAILING first, then LOCATION.
+ * Uses the same priority order as getAddress() — LOCATION first, then MAILING.
  * Returns a fallback object with empty strings so callers don't need null checks.
  */
 function getCityState(addresses: NpiAddress[]): { city: string; state: string } {
-  const mailing = addresses.find(a => a.address_purpose === 'MAILING');
-  if (mailing?.city) return { city: mailing.city, state: mailing.state };
-
   const location = addresses.find(a => a.address_purpose === 'LOCATION');
   if (location?.city) return { city: location.city, state: location.state };
+
+  const mailing = addresses.find(a => a.address_purpose === 'MAILING');
+  if (mailing?.city) return { city: mailing.city, state: mailing.state };
 
   return { city: '', state: '' };
 }
